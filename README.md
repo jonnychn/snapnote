@@ -1,8 +1,8 @@
-# Snapnote
+# Snap Notes
 
 A phone-first camera for the thing you will not remember later. Snap a photo, dictate or type why it matters, and file it in a folder.
 
-Photos and notes stay in the browser on that device.
+Photos, notes, and folders are stored in your Supabase account after you sign in with email and password.
 
 ## Use it
 

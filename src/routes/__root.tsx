@@ -3,7 +3,7 @@ import { AuthProvider } from "@/lib/auth/provider";
 import { PreviewHostBridge } from "@/components/preview-host-bridge";
 import appCss from "../styles.css?url";
 
-const APP_NAME = "Snapnote";
+const APP_NAME = "Snap Notes";
 
 export const Route = createRootRoute({
   head: () => ({
@@ -17,7 +17,7 @@ export const Route = createRootRoute({
       {
         name: "description",
         content:
-          "Snap a photo and say why it matters. Voice or text notes, filed in folders, saved on this phone.",
+          "Snap a photo and say why it matters. Voice or text notes, filed in folders, saved to your account.",
       },
       { name: "theme-color", content: "#16130f" },
     ],

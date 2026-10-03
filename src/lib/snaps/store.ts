@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import {
+  dropAllMediaUrls,
   dropMediaUrls,
   loadAll,
   makeImages,
@@ -37,6 +38,19 @@ type SnapState = {
 };
 
 let initStarted = false;
+let initGen = 0;
+
+export function resetSnapSession() {
+  initGen += 1;
+  initStarted = false;
+  dropAllMediaUrls();
+  useSnapStore.setState({
+    status: "loading",
+    error: "",
+    folders: [],
+    snaps: [],
+  });
+}
 
 function cleanName(name: string) {
   const trimmed = name.replace(/\s+/g, " ").trim();
@@ -53,10 +67,13 @@ export const useSnapStore = create<SnapState>((set, get) => ({
   init: async () => {
     if (initStarted) return;
     initStarted = true;
+    const gen = initGen;
     try {
       const data = await loadAll();
+      if (gen !== initGen) return;
       set({ ...data, status: "ready", error: "" });
     } catch (error) {
+      if (gen !== initGen) return;
       initStarted = false;
       set({ status: "error", error: storageMessage(error) });
     }

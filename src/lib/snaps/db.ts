@@ -1,3 +1,5 @@
+import { getSupabase } from "@/lib/supabase";
+
 export type Folder = {
   id: string;
   name: string;
@@ -19,139 +21,170 @@ export type Media = {
   thumb: Blob;
 };
 
-const DB_NAME = "snapnote";
-const DB_VERSION = 1;
+const BUCKET = "snap-photos";
 
-let dbPromise: Promise<IDBDatabase> | null = null;
+type FolderRow = {
+  id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+};
 
-function openDb(): Promise<IDBDatabase> {
-  if (typeof indexedDB === "undefined") {
-    return Promise.reject(new Error("Storage isn't available in this browser."));
+type SnapRow = {
+  id: string;
+  folder_id: string;
+  note: string;
+  created_at: string;
+  updated_at: string;
+};
+
+function toFolder(row: FolderRow): Folder {
+  return {
+    id: row.id,
+    name: row.name,
+    createdAt: Date.parse(row.created_at),
+    updatedAt: Date.parse(row.updated_at),
+  };
+}
+
+function toSnap(row: SnapRow): Snap {
+  return {
+    id: row.id,
+    folderId: row.folder_id,
+    note: row.note,
+    createdAt: Date.parse(row.created_at),
+    updatedAt: Date.parse(row.updated_at),
+  };
+}
+
+async function requireUserId() {
+  const { data, error } = await getSupabase().auth.getSession();
+  if (error) throw new Error(error.message);
+  const id = data.session?.user.id;
+  if (!id) throw new Error("Sign in to save notes.");
+  return id;
+}
+
+function fail(error: { message: string; code?: string } | null, fallback: string) {
+  if (!error) return;
+  const message = error.message || fallback;
+  if (
+    error.code === "PGRST205" ||
+    message.includes("schema cache") ||
+    /bucket not found/i.test(message)
+  ) {
+    throw new Error(
+      "Snap Notes can't see its tables in your Supabase project yet. Run the setup SQL once, then try again.",
+    );
   }
-  if (!dbPromise) {
-    dbPromise = new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, DB_VERSION);
-      req.onupgradeneeded = () => {
-        const db = req.result;
-        if (!db.objectStoreNames.contains("folders")) {
-          db.createObjectStore("folders", { keyPath: "id" });
-        }
-        if (!db.objectStoreNames.contains("snaps")) {
-          const snaps = db.createObjectStore("snaps", { keyPath: "id" });
-          snaps.createIndex("byFolder", "folderId");
-        }
-        if (!db.objectStoreNames.contains("media")) {
-          db.createObjectStore("media", { keyPath: "id" });
-        }
-      };
-      req.onsuccess = () => {
-        const db = req.result;
-        db.onversionchange = () => {
-          db.close();
-          dbPromise = null;
-        };
-        resolve(db);
-      };
-      req.onerror = () => {
-        dbPromise = null;
-        reject(req.error ?? new Error("Could not open storage."));
-      };
-    });
-  }
-  return dbPromise;
+  throw new Error(message);
 }
 
 export async function loadAll(): Promise<{ folders: Folder[]; snaps: Snap[] }> {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(["folders", "snaps"], "readonly");
-    const foldersReq = tx.objectStore("folders").getAll();
-    const snapsReq = tx.objectStore("snaps").getAll();
-    tx.oncomplete = () =>
-      resolve({
-        folders: foldersReq.result as Folder[],
-        snaps: snapsReq.result as Snap[],
-      });
-    tx.onerror = () => reject(tx.error ?? new Error("Could not read your notes."));
-  });
+  const supabase = getSupabase();
+  const [foldersRes, snapsRes] = await Promise.all([
+    supabase.from("folders").select("id,name,created_at,updated_at"),
+    supabase.from("snaps").select("id,folder_id,note,created_at,updated_at"),
+  ]);
+  fail(foldersRes.error, "Could not read your notes.");
+  fail(snapsRes.error, "Could not read your notes.");
+  return {
+    folders: ((foldersRes.data ?? []) as FolderRow[]).map(toFolder),
+    snaps: ((snapsRes.data ?? []) as SnapRow[]).map(toSnap),
+  };
 }
 
 export async function putFolder(folder: Folder): Promise<void> {
-  const db = await openDb();
-  await write("folders", folder, db);
+  const userId = await requireUserId();
+  const { error } = await getSupabase().from("folders").upsert({
+    id: folder.id,
+    user_id: userId,
+    name: folder.name,
+    created_at: new Date(folder.createdAt).toISOString(),
+    updated_at: new Date(folder.updatedAt).toISOString(),
+  });
+  fail(error, "Could not save that folder.");
 }
 
 export async function putSnap(snap: Snap, media: Media): Promise<void> {
-  const db = await openDb();
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(["snaps", "media", "folders"], "readwrite");
-    tx.objectStore("snaps").put(snap);
-    tx.objectStore("media").put(media);
-    const folderReq = tx.objectStore("folders").get(snap.folderId);
-    folderReq.onsuccess = () => {
-      const folder = folderReq.result as Folder | undefined;
-      if (folder) {
-        tx.objectStore("folders").put({ ...folder, updatedAt: snap.updatedAt });
-      }
-    };
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error ?? new Error("Could not save that photo."));
-    tx.onabort = () => reject(tx.error ?? new Error("Could not save that photo."));
+  const userId = await requireUserId();
+  const supabase = getSupabase();
+  const fullPath = `${userId}/${snap.id}/full.jpg`;
+  const thumbPath = `${userId}/${snap.id}/thumb.jpg`;
+  const [fullUp, thumbUp] = await Promise.all([
+    supabase.storage.from(BUCKET).upload(fullPath, media.full, {
+      contentType: "image/jpeg",
+      upsert: true,
+    }),
+    supabase.storage.from(BUCKET).upload(thumbPath, media.thumb, {
+      contentType: "image/jpeg",
+      upsert: true,
+    }),
+  ]);
+  fail(fullUp.error, "Could not save that photo.");
+  fail(thumbUp.error, "Could not save that photo.");
+  const { error } = await supabase.from("snaps").upsert({
+    id: snap.id,
+    user_id: userId,
+    folder_id: snap.folderId,
+    note: snap.note,
+    created_at: new Date(snap.createdAt).toISOString(),
+    updated_at: new Date(snap.updatedAt).toISOString(),
   });
+  fail(error, "Could not save that photo.");
+  const folderUpdate = await supabase
+    .from("folders")
+    .update({ updated_at: new Date(snap.updatedAt).toISOString() })
+    .eq("id", snap.folderId);
+  fail(folderUpdate.error, "Could not save that photo.");
 }
 
 export async function patchSnap(snap: Snap): Promise<void> {
-  const db = await openDb();
-  await write("snaps", snap, db);
+  const { error } = await getSupabase()
+    .from("snaps")
+    .update({
+      folder_id: snap.folderId,
+      note: snap.note,
+      updated_at: new Date(snap.updatedAt).toISOString(),
+    })
+    .eq("id", snap.id);
+  fail(error, "Could not save that note.");
 }
 
 export async function removeSnapRecord(id: string): Promise<void> {
-  const db = await openDb();
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(["snaps", "media"], "readwrite");
-    tx.objectStore("snaps").delete(id);
-    tx.objectStore("media").delete(id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error ?? new Error("Could not delete that photo."));
-  });
+  const userId = await requireUserId();
+  const supabase = getSupabase();
+  const removed = await supabase.storage.from(BUCKET).remove([`${userId}/${id}/full.jpg`, `${userId}/${id}/thumb.jpg`]);
+  fail(removed.error, "Could not delete that photo.");
+  const { error } = await supabase.from("snaps").delete().eq("id", id);
+  fail(error, "Could not delete that photo.");
 }
 
 export async function removeFolderRecord(id: string): Promise<string[]> {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(["folders", "snaps", "media"], "readwrite");
-    const index = tx.objectStore("snaps").index("byFolder");
-    const req = index.getAll(id);
-    req.onsuccess = () => {
-      const rows = req.result as Snap[];
-      for (const row of rows) {
-        tx.objectStore("snaps").delete(row.id);
-        tx.objectStore("media").delete(row.id);
-      }
-      tx.objectStore("folders").delete(id);
-    };
-    tx.oncomplete = () => resolve((req.result as Snap[] | undefined)?.map((row) => row.id) ?? []);
-    tx.onerror = () => reject(tx.error ?? new Error("Could not delete that folder."));
-  });
+  const userId = await requireUserId();
+  const supabase = getSupabase();
+  const listed = await supabase.from("snaps").select("id").eq("folder_id", id);
+  fail(listed.error, "Could not delete that folder.");
+  const ids = ((listed.data ?? []) as { id: string }[]).map((row) => row.id);
+  if (ids.length > 0) {
+    const paths = ids.flatMap((snapId) => [`${userId}/${snapId}/full.jpg`, `${userId}/${snapId}/thumb.jpg`]);
+    const removed = await supabase.storage.from(BUCKET).remove(paths);
+    fail(removed.error, "Could not delete that folder.");
+  }
+  const { error } = await supabase.from("folders").delete().eq("id", id);
+  fail(error, "Could not delete that folder.");
+  return ids;
 }
 
 export async function readMedia(id: string): Promise<Media | undefined> {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("media", "readonly");
-    const req = tx.objectStore("media").get(id);
-    req.onsuccess = () => resolve(req.result as Media | undefined);
-    req.onerror = () => reject(req.error ?? new Error("Could not open that photo."));
-  });
-}
-
-function write(store: "folders" | "snaps", value: Folder | Snap, db: IDBDatabase): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(store, "readwrite");
-    tx.objectStore(store).put(value);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error ?? new Error("Could not save."));
-  });
+  const userId = await requireUserId();
+  const supabase = getSupabase();
+  const [full, thumb] = await Promise.all([
+    supabase.storage.from(BUCKET).download(`${userId}/${id}/full.jpg`),
+    supabase.storage.from(BUCKET).download(`${userId}/${id}/thumb.jpg`),
+  ]);
+  if (full.error || thumb.error || !full.data || !thumb.data) return undefined;
+  return { id, full: full.data, thumb: thumb.data };
 }
 
 export function storageMessage(error: unknown): string {
@@ -233,6 +266,11 @@ export function dropMediaUrls(id: string) {
     if (url) URL.revokeObjectURL(url);
     urlCache.delete(key);
   }
+}
+
+export function dropAllMediaUrls() {
+  for (const url of urlCache.values()) URL.revokeObjectURL(url);
+  urlCache.clear();
 }
 
 export function appendNote(prev: string, spoken: string) {

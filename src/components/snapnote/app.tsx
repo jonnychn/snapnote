@@ -11,8 +11,10 @@ import {
   X,
 } from "lucide-react";
 import { appendNote, storageMessage, type Folder, type Snap } from "@/lib/snaps/db";
-import { useSnapStore, type DeletedSnap } from "@/lib/snaps/store";
+import { resetSnapSession, useSnapStore, type DeletedSnap } from "@/lib/snaps/store";
+import { getSupabase } from "@/lib/supabase";
 import { AnnotateScreen } from "./annotate";
+import { AuthScreen } from "./auth-screen";
 import { CaptureScreen } from "./capture";
 import { useDictation } from "./use-dictation";
 import {
@@ -41,22 +43,45 @@ type Dialog =
   | { kind: "menu"; folder: Folder };
 
 export function SnapnoteApp() {
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
-  if (!mounted) return <Boot />;
-  return <ReadyApp />;
+  const [user, setUser] = useState<{ id: string; email: string } | null | undefined>(undefined);
+
+  useEffect(() => {
+    let live = true;
+    const supabase = getSupabase();
+    supabase.auth.getSession().then(
+      ({ data }) => {
+        if (!live) return;
+        const session = data.session;
+        setUser(session ? { id: session.user.id, email: session.user.email ?? "" } : null);
+      },
+      () => {
+        if (live) setUser(null);
+      },
+    );
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session ? { id: session.user.id, email: session.user.email ?? "" } : null);
+    });
+    return () => {
+      live = false;
+      data.subscription.unsubscribe();
+    };
+  }, []);
+
+  if (user === undefined) return <Boot />;
+  if (!user) return <AuthScreen />;
+  return <ReadyApp key={user.id} email={user.email} />;
 }
 
 function Boot() {
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-lg flex-col px-5 pt-8">
       <p className="text-xs uppercase tracking-widest text-muted">On the go</p>
-      <h1 className="font-display text-4xl">Snapnote</h1>
+      <h1 className="font-display text-4xl">Snap Notes</h1>
     </main>
   );
 }
 
-function ReadyApp() {
+function ReadyApp({ email }: { email: string }) {
   const status = useSnapStore((s) => s.status);
   const error = useSnapStore((s) => s.error);
   const folders = useSnapStore((s) => s.folders);
@@ -77,6 +102,7 @@ function ReadyApp() {
 
   useEffect(() => {
     void init();
+    return () => resetSnapSession();
   }, [init]);
 
   useEffect(() => {
@@ -122,6 +148,23 @@ function ReadyApp() {
       <main className="mx-auto flex min-h-dvh w-full max-w-lg flex-col justify-center px-6 text-center">
         <h1 className="font-display text-3xl">Notes stayed put</h1>
         <p className="mt-2 text-muted">{error}</p>
+        <button
+          type="button"
+          className="btn btn-primary press mx-auto mt-6"
+          onClick={() => {
+            resetSnapSession();
+            void init();
+          }}
+        >
+          Try again
+        </button>
+        <button
+          type="button"
+          className="press mx-auto mt-2 min-h-11 text-sm text-muted"
+          onClick={() => void getSupabase().auth.signOut()}
+        >
+          Sign out
+        </button>
       </main>
     );
   }
@@ -132,6 +175,7 @@ function ReadyApp() {
     <div className="mx-auto min-h-dvh w-full max-w-lg">
       {screen.kind === "home" ? (
         <HomeScreen
+          email={email}
           folders={orderedFolders}
           snaps={snaps}
           query={query}
@@ -141,6 +185,7 @@ function ReadyApp() {
           onOpenSnap={(snapId) => setScreen({ kind: "detail", snapId })}
           onCreate={() => setDialog({ kind: "create" })}
           onSnap={() => setScreen({ kind: "capture" })}
+          onSignOut={() => void getSupabase().auth.signOut()}
         />
       ) : null}
 
@@ -346,6 +391,7 @@ function ReadyApp() {
 }
 
 function HomeScreen({
+  email,
   folders,
   snaps,
   query,
@@ -355,7 +401,9 @@ function HomeScreen({
   onOpenSnap,
   onCreate,
   onSnap,
+  onSignOut,
 }: {
+  email: string;
   folders: Folder[];
   snaps: Snap[];
   query: string;
@@ -365,6 +413,7 @@ function HomeScreen({
   onOpenSnap: (id: string) => void;
   onCreate: () => void;
   onSnap: () => void;
+  onSignOut: () => void;
 }) {
   const q = query.trim().toLowerCase();
   const folderHits = q ? folders.filter((folder) => folder.name.toLowerCase().includes(q)) : folders;
@@ -377,9 +426,15 @@ function HomeScreen({
   return (
     <div className="flex min-h-dvh flex-col">
       <header className="safe-top px-5 pt-6">
-        <p className="text-xs uppercase tracking-widest text-muted">On the go</p>
-        <h1 className="font-display text-4xl">Snapnote</h1>
-        <p className="mt-1 text-sm text-muted">A photo, and why it matters. Saved on this phone.</p>
+        <div className="flex items-start justify-between gap-3">
+          <p className="text-xs uppercase tracking-widest text-muted">On the go</p>
+          <button type="button" className="press min-h-11 shrink-0 text-sm text-muted" onClick={onSignOut}>
+            Sign out
+          </button>
+        </div>
+        <h1 className="font-display text-4xl">Snap Notes</h1>
+        <p className="mt-1 text-sm text-muted">A photo, and why it matters. Saved to your account.</p>
+        {email ? <p className="mt-1 truncate text-xs text-faint">{email}</p> : null}
       </header>
 
       <div className="px-5 pt-4">
